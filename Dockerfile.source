@@ -1,0 +1,23 @@
+# Сборка minio из исходников upstream-тега: публичные образы MinIO недоступны
+# (Docker Hub удалён, quay — только авторизованный pull, dl.min.io — 410),
+# поэтому образ собирается этим форком и публикуется в ghcr.io/united-software-platform/minio.
+# Контекст сборки — исходники тега minio/minio, этот файл копируется в контекст workflow'ем.
+FROM golang:1.24-alpine AS build
+
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/minio .
+
+FROM alpine:3.21
+
+RUN apk add --no-cache ca-certificates && \
+    addgroup -S minio && adduser -S -G minio minio-user
+
+COPY --from=build /out/minio /usr/bin/minio
+COPY dockerscripts/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+
+EXPOSE 9000 9001
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]
