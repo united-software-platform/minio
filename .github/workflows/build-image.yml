@@ -2,15 +2,20 @@ name: build-minio-image
 
 # Собирает образ minio из исходников upstream-тега и публикует в ghcr.io.
 # Причина: публичные образы MinIO закрыты (Docker Hub удалён 2026-09-11,
-# quay — только авторизованный pull), community-релизы заморожены —
-# пересборка последнего community-тега воспроизводима из этого workflow.
+# quay — только авторизованный pull), поэтому образ пересобирается этим форком.
+#
+# Актуальность: еженедельный запуск сам выбирает свежайший тег minio/minio
+# и пересобирает образ, только если этот тег ещё не публиковался в ghcr;
+# ручной запуск может собрать произвольный тег через вход ref.
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Тег minio/minio для сборки'
+        description: 'Тег minio/minio для сборки (пусто — свежайший)'
         required: false
-        default: 'RELEASE.2025-10-15T17-29-55Z'
+        default: ''
+  schedule:
+    - cron: '30 4 * * 1'
 
 jobs:
   build:
@@ -19,37 +24,73 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Определить тег сборки
+        id: tag
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then
+            tag="$INPUT_REF"
+          else
+            tag=$(git ls-remote --tags --sort=-v:refname https://github.com/minio/minio.git \
+              | grep -oP 'refs/tags/RELEASE\.\d{4}-\d{2}-\d{2}T[0-9-]+Z$' \
+              | head -1 | sed 's|refs/tags/||')
+          fi
+          if [ -z "$tag" ]; then echo "тег не определён" >&2; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "собираем: $tag"
+
+      - name: Уже собран — пропустить
+        id: exists
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin \
+             && docker manifest inspect "ghcr.io/${{ github.repository_owner }}/minio:$TAG" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "тег $TAG уже в ghcr — пересборка не нужна"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Исходники тега minio
+        if: steps.exists.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           repository: minio/minio
-          ref: ${{ inputs.ref || 'RELEASE.2025-10-15T17-29-55Z' }}
+          ref: ${{ steps.tag.outputs.tag }}
           path: minio
 
       - name: Dockerfile этого форка
+        if: steps.exists.outputs.skip != 'true'
         uses: actions/checkout@v4
         with:
           path: build
 
       - name: Dockerfile в контекст сборки
+        if: steps.exists.outputs.skip != 'true'
         run: cp build/Dockerfile.source minio/Dockerfile.source
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.skip != 'true'
 
       - uses: docker/login-action@v3
+        if: steps.exists.outputs.skip != 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Сборка и публикация
+        if: steps.exists.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: ./minio
           file: ./minio/Dockerfile.source
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/minio:${{ inputs.ref || 'RELEASE.2025-10-15T17-29-55Z' }}
+            ghcr.io/${{ github.repository_owner }}/minio:${{ steps.tag.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/minio:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
