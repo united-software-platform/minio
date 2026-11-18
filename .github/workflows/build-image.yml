@@ -14,6 +14,11 @@ on:
         description: 'Тег minio/minio для сборки (пусто — свежайший)'
         required: false
         default: ''
+      force:
+        description: 'Пересобрать, даже если тег уже опубликован'
+        type: boolean
+        required: false
+        default: false
   schedule:
     - cron: '30 4 * * 1'
 
@@ -46,6 +51,11 @@ jobs:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "force — пересобираем тег $TAG"
+            exit 0
+          fi
           if printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin \
              && docker manifest inspect "ghcr.io/${{ github.repository_owner }}/minio:$TAG" >/dev/null 2>&1; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -88,6 +98,8 @@ jobs:
         with:
           context: ./minio
           file: ./minio/Dockerfile.source
+          build-args: |
+            MINIO_VERSION=${{ steps.tag.outputs.tag }}
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/minio:${{ steps.tag.outputs.tag }}
